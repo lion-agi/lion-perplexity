@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "lion-perplexity"
+version = "0.1.0"
+description = ""
+authors = ["OceanLi <quantocean.li@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+lion-service = "^1.1.0"
+aiohttp = "^3.10.10"
+
+
+[tool.poetry.group.dev.dependencies]
+isort = "^5.13.2"
+black = "^24.10.0"
+pytest = "^8.3.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+line_length = 88
