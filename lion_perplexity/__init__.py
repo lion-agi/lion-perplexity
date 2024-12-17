@@ -1,3 +1,7 @@
-from .perplexity_service import PerplexityService
+# Copyright (c) 2023 - 2024, HaiyangLi <quantocean.li at gmail dot com>
+#
+# SPDX-License-Identifier: Apache-2.0
 
-__all__ = ["PerplexityService"]
+from .PerplexityService import PerplexityService
+
+__all__ = ("PerplexityService",)

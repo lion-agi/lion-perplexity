@@ -1,183 +1,169 @@
 import json
-from typing import Any, AsyncIterator, BinaryIO
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import aiohttp
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from .data_models import PerplexityEndpointRequestBody
 
 
-class PerplexityAPIError(Exception):
-    """Base exception for Perplexity API errors."""
+class PerplexityRequest(BaseModel):
+    """Handler for making requests to the Perplexity API."""
 
-    def __init__(
-        self, message: str, http_status: int | None = None, headers: dict | None = None
-    ):
-        super().__init__(message)
-        self.message = message
-        self.http_status = http_status
-        self.headers = headers or {}
+    api_key: str = Field(
+        description="API key for authentication", exclude=True
+    )
+    endpoint: str = Field(description="Endpoint for request")
+    method: str = Field(description="HTTP method")
+    content_type: str | None = "application/json"
+    base_url: str = "https://api.perplexity.ai"
 
-
-class PerplexityRequest:
-    """Base class for making requests to Perplexity API."""
-
-    def __init__(
-        self,
-        api_key: str,
-        endpoint: str,
-        method: str,
-        content_type: str | None = None,
-        base_url: str = "https://api.perplexity.ai",
-    ) -> None:
-        """Initialize request handler.
-
-        Args:
-            api_key: API key for authentication
-            endpoint: API endpoint
-            method: HTTP method
-            content_type: Optional content type
-            base_url: Base API URL
-        """
-        self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.endpoint = endpoint
-        self.method = method
-        self.content_type = content_type
-        self.session = None
-
-    async def _ensure_session(self) -> None:
-        """Ensure aiohttp session exists."""
-        if self.session is None:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-            }
-            if self.content_type:
-                headers["Content-Type"] = self.content_type
-
-            self.session = aiohttp.ClientSession(headers=headers)
-
-    def _format_url(self, path_params: dict | None = None) -> str:
-        """Format URL with path parameters."""
-        endpoint = self.endpoint
-        if path_params:
-            endpoint = endpoint.format(**path_params)
-        return f"{self.base_url}/{endpoint.lstrip('/')}"
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="allow",  # Allow extra attributes for mocking in tests
+    )
 
     async def invoke(
         self,
-        json_data: dict | BaseModel | None = None,
-        form_data: dict | None = None,
-        params: dict | None = None,
-        path_params: dict | None = None,
-        output_file: BinaryIO | None = None,
+        json_data: None | (
+            dict[str, Any] | PerplexityEndpointRequestBody
+        ) = None,
+        form_data: BaseModel | None = None,
+        output_file: str | None = None,
+        with_response_header: bool = False,
         parse_response: bool = True,
-        **kwargs: Any,
-    ) -> tuple[dict | bytes | None, dict]:
-        """Make request to Perplexity API.
+    ) -> dict[str, Any] | tuple[dict[str, Any], dict[str, str]] | bytes | None:
+        """Make a request to the Perplexity API."""
+        url = f"{self.base_url}/{self.endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+        }
 
-        Args:
-            json_data: JSON body data
-            form_data: Form data
-            params: Query parameters
-            path_params: Path parameters
-            output_file: Optional file for response
-            parse_response: Whether to parse JSON response
-            **kwargs: Additional arguments for request
+        if self.content_type:
+            headers["Content-Type"] = self.content_type
 
-        Returns:
-            Tuple of (response data, response headers)
+        if isinstance(json_data, PerplexityEndpointRequestBody):
+            json_data = json_data.model_dump(exclude_unset=True)
 
-        Raises:
-            PerplexityAPIError: On API errors
-        """
-        await self._ensure_session()
-
-        url = self._format_url(path_params)
-
-        if isinstance(json_data, BaseModel):
-            json_data = json_data.model_dump(exclude_unset=True, exclude_none=True)
-
-        try:
-            async with self.session.request(
+        async with aiohttp.ClientSession() as client:
+            response = await client.request(
                 method=self.method,
                 url=url,
+                headers=headers,
                 json=json_data,
-                data=form_data,
-                params=params,
-                **kwargs,
-            ) as response:
-                headers = dict(response.headers)
-
-                if response.status >= 400:
-                    error_detail = await response.text()
-                    raise PerplexityAPIError(
-                        message=f"HTTP {response.status}: {error_detail}",
-                        http_status=response.status,
-                        headers=headers,
+                data=form_data.model_dump() if form_data else None,
+            )
+            async with response:
+                if response.status != 200:
+                    try:
+                        error_body = await response.json()
+                        error_msg = error_body.get("error", {}).get(
+                            "message", str(error_body)
+                        )
+                    except Exception:
+                        error_msg = await response.text()
+                    raise Exception(
+                        f"API request failed with status {response.status}: {error_msg}"
                     )
 
                 if output_file:
-                    chunk_size = 8192
-                    async for chunk in response.content.iter_chunked(chunk_size):
-                        output_file.write(chunk)
-                    return None, headers
+                    with open(output_file, "wb") as f:
+                        async for chunk in response.content.iter_chunked(8192):
+                            f.write(chunk)
+                    return None
 
                 if parse_response:
-                    return await response.json(), headers
+                    response_body = await response.json()
                 else:
-                    return await response.read(), headers
+                    response_body = await response.text()
+                    try:
+                        response_body = json.loads(response_body)
+                    except json.JSONDecodeError:
+                        pass
 
-        except aiohttp.ClientError as e:
-            raise PerplexityAPIError(
-                message=str(e), http_status=getattr(e, "status", None)
-            )
+                if with_response_header:
+                    headers = {
+                        k.lower(): v for k, v in response.headers.items()
+                    }
+                    return response_body, headers
+                return response_body
 
     async def stream(
-        self, json_data: dict | BaseModel | None = None, **kwargs: Any
-    ) -> AsyncIterator[dict]:
-        """Handle streaming responses.
+        self,
+        json_data: None | (
+            dict[str, Any] | PerplexityEndpointRequestBody
+        ) = None,
+        output_file: str | None = None,
+        with_response_header: bool = False,
+        verbose: bool = True,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream responses from the Perplexity API."""
+        if isinstance(json_data, PerplexityEndpointRequestBody):
+            json_data = json_data.model_dump(exclude_unset=True)
 
-        Args:
-            json_data: JSON body data
-            **kwargs: Additional arguments
+        if not json_data.get("stream", False):
+            json_data["stream"] = True
 
-        Yields:
-            Streamed response chunks
-        """
-        await self._ensure_session()
+        url = f"{self.base_url}/{self.endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
 
-        if isinstance(json_data, BaseModel):
-            json_data = json_data.model_dump(exclude_unset=True, exclude_none=True)
-
-        try:
-            async with self.session.request(
-                method=self.method,
-                url=f"{self.base_url}/{self.endpoint.lstrip('/')}",
-                json=json_data,
-                **kwargs,
-            ) as response:
-                if response.status >= 400:
-                    error_detail = await response.text()
-                    raise PerplexityAPIError(
-                        message=f"HTTP {response.status}: {error_detail}",
-                        http_status=response.status,
-                        headers=dict(response.headers),
+        async with aiohttp.ClientSession() as client:
+            response = await client.post(url, headers=headers, json=json_data)
+            async with response:
+                if response.status != 200:
+                    try:
+                        error_body = await response.json()
+                        error_msg = error_body.get("error", {}).get(
+                            "message", str(error_body)
+                        )
+                    except Exception:
+                        error_msg = await response.text()
+                    raise Exception(
+                        f"API request failed with status {response.status}: {error_msg}"
                     )
 
-                async for line in response.content:
-                    if line:
-                        if line.startswith(b"data: "):
-                            line = line[6:]
-                        if line.strip() == b"[DONE]":
-                            break
-                        try:
-                            yield json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+                if with_response_header:
+                    headers = {
+                        k.lower(): v for k, v in response.headers.items()
+                    }
+                    yield {"headers": headers}
 
-                # Yield headers as last item for rate limiting
-                yield dict(response.headers)
+                file_handle = None
+                if output_file:
+                    try:
+                        file_handle = open(output_file, "w")
+                    except Exception as e:
+                        raise ValueError(
+                            f"Failed to open output file {output_file}: {e}"
+                        )
 
-        except aiohttp.ClientError as e:
-            raise PerplexityAPIError(
-                message=str(e), http_status=getattr(e, "status", None)
-            )
+                try:
+                    async for chunk in response.content:
+                        if chunk:
+                            chunk_str = chunk.decode("utf-8").strip()
+                            if chunk_str.startswith("data: "):
+                                chunk_str = chunk_str[
+                                    6:
+                                ]  # Remove "data: " prefix
+                            try:
+                                chunk_data = json.loads(chunk_str)
+                                if file_handle:
+                                    file_handle.write(
+                                        json.dumps(chunk_data) + "\n"
+                                    )
+                                if verbose and "choices" in chunk_data:
+                                    content = chunk_data["choices"][0][
+                                        "delta"
+                                    ]["content"]
+                                    print(content, end="", flush=True)
+                                yield chunk_data
+                            except json.JSONDecodeError:
+                                continue
+                finally:
+                    if file_handle:
+                        file_handle.close()
